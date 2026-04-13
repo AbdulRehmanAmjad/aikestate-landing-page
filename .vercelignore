@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+db
+skills
+examples
+mini-services
+upload
+download
+worklog.md
+dev.log
+*.db
