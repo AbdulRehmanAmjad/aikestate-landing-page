@@ -1,23 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-function splitTextIntoChunks(text: string, maxLength = 1000): string[] {
-  const chunks: string[] = [];
-  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-
-  let currentChunk = '';
-  for (const sentence of sentences) {
-    if ((currentChunk + sentence).length <= maxLength) {
-      currentChunk += sentence;
-    } else {
-      if (currentChunk) chunks.push(currentChunk.trim());
-      currentChunk = sentence;
-    }
-  }
-  if (currentChunk) chunks.push(currentChunk.trim());
-
-  return chunks;
-}
-
 export async function POST(req: NextRequest) {
   try {
     const { text, voice = 'tongtong', speed = 1.0 } = await req.json();
@@ -36,16 +18,42 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const ZAI = (await import('z-ai-web-dev-sdk')).default;
-    const zai = await ZAI.create();
+    let ZAI;
+    try {
+      ZAI = (await import('z-ai-web-dev-sdk')).default;
+    } catch {
+      return NextResponse.json(
+        { error: 'TTS service is currently unavailable' },
+        { status: 503 }
+      );
+    }
 
-    const response = await zai.audio.tts.create({
-      input: text.trim(),
-      voice: voice,
-      speed: speed,
-      response_format: 'wav',
-      stream: false,
-    });
+    let zai;
+    try {
+      zai = await ZAI.create();
+    } catch {
+      return NextResponse.json(
+        { error: 'TTS service initialization failed' },
+        { status: 503 }
+      );
+    }
+
+    let response;
+    try {
+      response = await zai.audio.tts.create({
+        input: text.trim(),
+        voice: voice,
+        speed: speed,
+        response_format: 'wav',
+        stream: false,
+      });
+    } catch (ttsError) {
+      console.error('TTS API Error:', ttsError);
+      return NextResponse.json(
+        { error: 'Speech generation failed. Please try again.' },
+        { status: 503 }
+      );
+    }
 
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(new Uint8Array(arrayBuffer));
