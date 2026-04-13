@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageCircle, X, Send, Volume2, VolumeX, Loader2, Mic, Pause } from 'lucide-react';
+import { X, Send, Volume2, VolumeX, Mic, Pause } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -22,6 +22,7 @@ export default function VoiceAssistant() {
   const blobUrlRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const speechSynthRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   // Listen for external open events (from CTA button etc.)
   useEffect(() => {
@@ -53,68 +54,14 @@ export default function VoiceAssistant() {
         URL.revokeObjectURL(blobUrlRef.current);
         blobUrlRef.current = null;
       }
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
     };
   }, []);
 
-  const playAudio = useCallback(async (text: string) => {
-    if (isMuted || !text) return;
-
-    try {
-      // Stop any existing audio
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-        blobUrlRef.current = null;
-      }
-
-      setIsSpeaking(true);
-
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voice: 'tongtong', speed: 1.0 }),
-      });
-
-      if (!response.ok) {
-        throw new Error('TTS failed');
-      }
-
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      blobUrlRef.current = url;
-
-      const audio = new Audio(url);
-      audioRef.current = audio;
-
-      audio.onended = () => {
-        setIsSpeaking(false);
-        if (blobUrlRef.current === url) {
-          URL.revokeObjectURL(url);
-          blobUrlRef.current = null;
-        }
-        audioRef.current = null;
-      };
-
-      audio.onerror = () => {
-        setIsSpeaking(false);
-        if (blobUrlRef.current === url) {
-          URL.revokeObjectURL(url);
-          blobUrlRef.current = null;
-        }
-        audioRef.current = null;
-      };
-
-      await audio.play();
-    } catch (error) {
-      console.error('Audio playback error:', error);
-      setIsSpeaking(false);
-    }
-  }, [isMuted]);
-
   const stopAudio = useCallback(() => {
+    // Stop server TTS audio
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
@@ -124,8 +71,106 @@ export default function VoiceAssistant() {
       URL.revokeObjectURL(blobUrlRef.current);
       blobUrlRef.current = null;
     }
+    // Stop browser speech
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    speechSynthRef.current = null;
     setIsSpeaking(false);
   }, []);
+
+  const speakWithBrowser = useCallback((text: string) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return false;
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    // Try to pick a good English voice
+    const voices = window.speechSynthesis.getVoices();
+    const englishVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Female'))
+      || voices.find(v => v.lang.startsWith('en'))
+      || voices[0];
+    if (englishVoice) utterance.voice = englishVoice;
+
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      speechSynthRef.current = null;
+    };
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+      speechSynthRef.current = null;
+    };
+
+    speechSynthRef.current = utterance;
+    setIsSpeaking(true);
+    window.speechSynthesis.speak(utterance);
+    return true;
+  }, []);
+
+  const playAudio = useCallback(async (text: string) => {
+    if (isMuted || !text) return;
+
+    try {
+      // Stop any existing audio first
+      stopAudio();
+      setIsSpeaking(true);
+
+      // Try server TTS API first
+      try {
+        const response = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, voice: 'tongtong', speed: 1.0 }),
+        });
+
+        if (response.ok) {
+          const blob = await response.blob();
+          // Check if we got actual audio (not an error JSON)
+          if (blob.size > 1000 && blob.type.includes('audio')) {
+            const url = URL.createObjectURL(blob);
+            blobUrlRef.current = url;
+
+            const audio = new Audio(url);
+            audioRef.current = audio;
+
+            audio.onended = () => {
+              setIsSpeaking(false);
+              if (blobUrlRef.current === url) {
+                URL.revokeObjectURL(url);
+                blobUrlRef.current = null;
+              }
+              audioRef.current = null;
+            };
+
+            audio.onerror = () => {
+              setIsSpeaking(false);
+              if (blobUrlRef.current === url) {
+                URL.revokeObjectURL(url);
+                blobUrlRef.current = null;
+              }
+              audioRef.current = null;
+              // Fallback to browser speech
+              speakWithBrowser(text);
+            };
+
+            await audio.play();
+            return;
+          }
+        }
+      } catch {
+        // Server TTS failed, use browser fallback
+      }
+
+      // Fallback: Use browser's built-in speech synthesis
+      speakWithBrowser(text);
+    } catch (error) {
+      console.error('Audio playback error:', error);
+      setIsSpeaking(false);
+    }
+  }, [isMuted, stopAudio, speakWithBrowser]);
 
   const sendMessage = useCallback(async (messageText?: string) => {
     const text = messageText || input.trim();
@@ -163,16 +208,13 @@ export default function VoiceAssistant() {
 
       // Auto-speak the response
       if (!isMuted && data.response) {
-        const ttsText = data.response.length > 1024
-          ? data.response.substring(0, 1021) + '...'
-          : data.response;
-        playAudio(ttsText);
+        playAudio(data.response);
       }
     } catch (error) {
       console.error('Chat error:', error);
       const errorMessage: Message = {
         role: 'assistant',
-        content: 'Sorry, I encountered an error. Please try again.',
+        content: "I'm here to help! Could you please try asking again? You can ask about our properties, pricing, or schedule a visit.",
       };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
@@ -191,10 +233,7 @@ export default function VoiceAssistant() {
     const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
     if (lastAssistant) {
       stopAudio();
-      const ttsText = lastAssistant.content.length > 1024
-        ? lastAssistant.content.substring(0, 1021) + '...'
-        : lastAssistant.content;
-      playAudio(ttsText);
+      playAudio(lastAssistant.content);
     }
   };
 
@@ -269,7 +308,7 @@ export default function VoiceAssistant() {
                 </div>
               </div>
               <div className="flex items-center gap-0.5">
-                {/* Single Play/Pause button - not duplicate */}
+                {/* Play/Pause button */}
                 <Button
                   variant="ghost"
                   size="icon"
@@ -285,7 +324,7 @@ export default function VoiceAssistant() {
                 >
                   {isSpeaking ? <Pause className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
                 </Button>
-                {/* Mute toggle - separate from play/stop */}
+                {/* Mute toggle */}
                 <Button
                   variant="ghost"
                   size="icon"
